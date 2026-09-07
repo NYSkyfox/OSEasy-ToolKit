@@ -7,10 +7,11 @@
 #   发送通道：UDP 单播 → 学生机:8040（遍历单播 = 原生教师端"全体"的实现）
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 
 from src.modules.remote_crasher import (
     crash, crash_targets, expand_cidr, parse_payload, DEFAULT_PORT,
+    RESULT_OK, RESULT_FAIL,
 )
 from src.modules.teacher_control import (
     send_control, send_multi, build_packet, hex_preview,
@@ -270,6 +271,12 @@ class PageAdvanced:
     # ─────────────────────────── 动作 ───────────────────────────
 
     def _do_crash(self):
+        """发起崩溃指令发送（后台线程执行，完成后主线程弹窗）。
+
+        交互逻辑：
+          - 成功 → 弹 info 对话框，显示详细结果
+          - 失败 → 弹 askyesno 对话框，显示错误详情，询问是否重试
+        """
         ui = self.ui
         ip = self.ip_input.get().strip()
         if not ip:
@@ -288,11 +295,34 @@ class PageAdvanced:
                 result = crash_targets(hosts[:64], port, payload)
             else:
                 result = crash(ip, port, payload)
-            self.ui.append_text(self.result_text, result, ui.root)
+            # 线程内不能直接弹窗（Tk 非线程安全），调度回主线程
+            ui.root.after(0, lambda: self._crash_done(result, ip, port, payload))
 
         self.ui.clear_text(self.result_text)
         self.ui.append_text(self.result_text, f"正在向 {ip}:{port} 发送崩溃指令...", ui.root)
         ui._run_in_thread(_run, "远程崩溃")
+
+    def _crash_done(self, result: str, ip: str, port: int, payload: bytes):
+        """主线程回调：追加结果 + 按成功/失败弹对话框。"""
+        self.ui.append_text(self.result_text, result, self.ui.root)
+        detail = result.replace(RESULT_OK, "").replace(RESULT_FAIL, "").strip()
+        is_ok = result.startswith(RESULT_OK)
+        if is_ok:
+            messagebox.showinfo(
+                "崩溃指令已触发",
+                f"目标: {ip}:{port}\n载荷: {payload!r}\n\n"
+                f"✅ 发送成功\n\n{detail}",
+            )
+        else:
+            retry = messagebox.askyesno(
+                "崩溃指令发送失败",
+                f"目标: {ip}:{port}\n载荷: {payload!r}\n\n"
+                f"❌ 发送失败\n\n{detail}\n\n"
+                f"是否重试？",
+            )
+            if retry:
+                # 递归重跑（复用当前 GUI 输入）
+                self._do_crash()
 
     def _do_install_test(self):
         """生成并运行学生端安装测试脚本"""
