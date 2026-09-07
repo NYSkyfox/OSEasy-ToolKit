@@ -67,8 +67,9 @@ class PageAdvanced:
         ui = self.ui
         info_frame = ttk.LabelFrame(ctrl_frame, text="远程功能（崩溃载荷）", padding=5)
         info_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(info_frame, text="向目标 IP 发送崩溃载荷，触发远端监控进程终止。",
-                  foreground="gray").pack(anchor=tk.W, padx=2)
+        ttk.Label(info_frame, text="向目标 IP 发送崩溃载荷，触发教师端监控通道崩溃。\n"
+                  "逆向确认：9003 未监听时自动重试；收到'被迫关闭连接'=崩溃已触发。",
+                  foreground="gray", wraplength=520).pack(anchor=tk.W, padx=2)
 
         addr_frame = ttk.Frame(info_frame)
         addr_frame.pack(fill=tk.X, padx=2, pady=5)
