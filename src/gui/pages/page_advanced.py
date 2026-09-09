@@ -15,7 +15,7 @@ from src.modules.remote_crasher import (
 )
 from src.modules.teacher_control import (
     send_control, send_multi, build_packet, hex_preview,
-    parse_targets, discover_students,
+    parse_targets, discover_students, listen_teacher_ip,
     DEFAULT_PORT as TC_DEFAULT_PORT,
     CMD_CALL_SIGN, CMD_REMOTE_CMD, CMD_STU_SET, CMD_EXAM_FILE_END,
     CMD_STU_INFO, CMD_NET_LIMIT,
@@ -75,9 +75,16 @@ class PageAdvanced:
         addr_frame = ttk.Frame(info_frame)
         addr_frame.pack(fill=tk.X, padx=2, pady=5)
         ttk.Label(addr_frame, text="目标 IP/网段:").pack(anchor=tk.W)
-        self.ip_input = ttk.Entry(addr_frame)
-        self.ip_input.pack(fill=tk.X, pady=2)
+        ip_row = ttk.Frame(addr_frame)
+        ip_row.pack(fill=tk.X, pady=2)
+        self.ip_input = ttk.Entry(ip_row)
+        self.ip_input.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ui.bind_tooltip(self.ip_input, "FUNC_CRASH_IP")
+        self.btn_auto_teacher = ttk.Button(ip_row, text="自动获取教师端IP",
+                                           command=self._do_auto_teacher_ip)
+        self.btn_auto_teacher.pack(side=tk.LEFT, padx=4)
+        ui.bind_tooltip(self.btn_auto_teacher,
+                        "监听局域网 7777 教师广播，自动把教师机 IP 填入目标框")
 
         ttk.Label(addr_frame, text="端口:").pack(anchor=tk.W)
         self.port_input = ttk.Entry(addr_frame)
@@ -269,6 +276,56 @@ class PageAdvanced:
         return text.encode("utf-8")
 
     # ─────────────────────────── 动作 ───────────────────────────
+
+    def _do_auto_teacher_ip(self):
+        """监听局域网 7777 教师广播，自动把教师机 IP 填入崩溃目标框。
+
+        教师端每 ~1s 广播一次 teacherip，所以监听几秒内通常能拿到。
+        在后台线程运行（UDP 等待不阻塞 GUI），完成后调度回主线程填入 IP。
+        """
+        ui = self.ui
+        # 防重复触发
+        if getattr(self, "_auto_busy", False):
+            ui.show_snakemessage("正在监听教师广播，请稍候…")
+            return
+        self._auto_busy = True
+        self.btn_auto_teacher.config(state="disabled", text="监听中…")
+
+        def _run():
+            try:
+                tip = listen_teacher_ip(timeout=8.0)
+            except OSError as exc:
+                tip = None
+                err = str(exc)
+                ui.root.after(0, lambda: self._auto_teacher_done(
+                    None, f"无法监听 7777 端口：{err}\n（可能被学生端进程占用，需以管理员或改用 pktmon 确认）"))
+                return
+            ui.root.after(0, lambda: self._auto_teacher_done(tip))
+
+        ui.clear_text(self.result_text)
+        ui.append_text(self.result_text, "[自动获取] 正在监听局域网 7777 教师广播…", ui.root)
+        ui._run_in_thread(_run, "自动获取教师端IP")
+
+    def _auto_teacher_done(self, tip, msg=None):
+        """主线程回调：把拿到的教师机 IP 填入目标框并恢复按钮。"""
+        self._auto_busy = False
+        self.btn_auto_teacher.config(state="normal", text="自动获取教师端IP")
+        if msg:
+            self.ui.append_text(self.result_text, msg, self.ui.root)
+            self.ui.show_snakemessage("自动获取教师端IP失败")
+            return
+        if tip:
+            self.ip_input.delete(0, tk.END)
+            self.ip_input.insert(0, tip)
+            self.ui.append_text(self.result_text, f"[自动获取] 已填入教师机 IP：{tip}", self.ui.root)
+            self.ui.show_snakemessage(f"已填入教师机 IP：{tip}")
+        else:
+            self.ui.append_text(
+                self.result_text,
+                "[自动获取] 超时未捕获到教师广播（确认教师端在线且在同一网段）",
+                self.ui.root,
+            )
+            self.ui.show_snakemessage("未获取到教师端IP（教师广播不可达）")
 
     def _do_crash(self):
         """发起崩溃指令发送（后台线程执行，完成后主线程弹窗）。

@@ -53,6 +53,10 @@ DEFAULT_PORT = 8040
 LOCAL_DEVICE_PORT = 8045     # DeviceControl 管控通道
 LOCAL_NPD_PORT = 9030        # npd-auto 通道
 
+# 教师发现端口/标识（core.conf: ChannleScanPort / Report.md 连接建立流程）
+CHANNEL_SCAN_PORT = 7777     # 教师端每~1s 在此广播 teacherip
+TEACHERIP_MSG_ID = "teacherip"
+
 DEFAULT_TIMEOUT = 1.5
 
 # ── 命令类型号（MainLogic.dll / IDA 导出确认）──
@@ -434,3 +438,85 @@ def discover_students(cidr: str, port: int = DEFAULT_PORT, timeout: float = 0.35
 
 # 兼容旧引用：保持旧名可用
 net_limit_payload_old = net_limit_payload
+
+
+# ══════════════════════════ 教师端自动发现 ══════════════════════════
+
+def _is_private_ip(ip: str) -> bool:
+    """局域网私有地址判断（仅接受可能承载教师机的内网来源）。"""
+    if not ip:
+        return False
+    if ip.startswith("127.") or ip == "::1":
+        return False
+    try:
+        a = int(ip.split(".")[0]); b = int(ip.split(".")[1])
+    except Exception:
+        return False
+    if a == 10 or (a == 192 and b == 168) or (a == 169 and b == 254):
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    return False
+
+
+def _parse_teacherip(data: bytes):
+    """从 7777 广播报文解析 teacher_ip。
+
+    教师端 teacherip 广播是**纯 JSON 无 16B 头**，形如：
+        {"channel":N,"checksum":...,"msg_id":"teacherip","teacher_ip":"<IP>"}
+    匹配到 msg_id == "teacherip" 才返回其 teacher_ip，否则返回 None。
+    """
+    try:
+        txt = data.decode("utf-8", "replace").strip()
+        obj = json.loads(txt)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("msg_id") != TEACHERIP_MSG_ID:
+        return None
+    tip = obj.get("teacher_ip")
+    return tip if isinstance(tip, str) and tip else None
+
+
+def listen_teacher_ip(timeout: float = 8.0, port: int = CHANNEL_SCAN_PORT):
+    """监听局域网内教师机的 7777 'teacherip' 广播，返回教师机 IP。
+
+    教师端每 ~1 秒在 7777 端口广播一条 teacherip（含教师机 IP 与频道位）。
+    本函数在本机 7777 端口 bind 监听，过滤掉回环/公网来源后解析出教师 IP。
+
+    Args:
+        timeout: 最多等待秒数（教师广播约 1s 一条，给几秒足够）。
+        port:    监听的 UDP 端口（默认 7777 / ChannleScanPort）。
+
+    Returns:
+        找到则返回教师机 IP 字符串；超时未找到返回 None。
+
+    Raises:
+        OSError: 无法绑定 7777（多半被学生端进程占用，需提示用户改用 pktmon 或确认本机未占用）。
+    """
+    deadline = time.time() + float(timeout)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", int(port)))
+    try:
+        while time.time() < deadline:
+            s.settimeout(min(1.0, max(0.2, deadline - time.time())))
+            try:
+                data, addr = s.recvfrom(4096)
+            except socket.timeout:
+                continue
+            src = addr[0]
+            if not _is_private_ip(src):
+                continue                      # 丢弃回环/公网源
+            tip = _parse_teacherip(data)
+            if tip:
+                info(f"教师端自动发现：来自 {src} 的 teacherip -> 教师机 {tip}")
+                return tip
+        return None
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
